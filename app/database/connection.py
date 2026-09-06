@@ -4,19 +4,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
-from app.database.base import Base
-
-
-DATABASE_URL = (
-    "postgresql+asyncpg://postgres:Petruschima3535@localhost:5433/recipe_db"
-)
+from app.core.config import settings
 
 
 engine = create_async_engine(
-    DATABASE_URL,
-    echo=True,
+    settings.DATABASE_URL,
+    echo=settings.DEBUG,
 )
-
 
 AsyncSessionLocal = async_sessionmaker(
     bind=engine,
