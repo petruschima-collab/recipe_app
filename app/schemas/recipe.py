@@ -3,126 +3,69 @@ from datetime import datetime
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# ============================================================
-# RECIPE CREATE
-# ============================================================
-
-class RecipeCreate(BaseModel):
+class RecipeBase(BaseModel):
     name: str = Field(
         ...,
         min_length=1,
-        max_length=255,
+        max_length=150,
     )
 
-    description: str | None = Field(
-        default=None,
+    description: str | None = None
+
+    category_id: int | None = None
+
+    is_public: bool = False
+
+    prep_minutes: int = Field(
+        default=0,
+        ge=0,
     )
 
-    category_id: int | None = Field(
-        default=None,
-        gt=0,
+    cook_minutes: int = Field(
+        default=0,
+        ge=0,
     )
 
 
-# ============================================================
-# RECIPE UPDATE
-# ============================================================
+class RecipeCreate(RecipeBase):
+    pass
+
 
 class RecipeUpdate(BaseModel):
     name: str | None = Field(
         default=None,
         min_length=1,
-        max_length=255,
+        max_length=150,
     )
 
-    description: str | None = Field(
+    description: str | None = None
+
+    category_id: int | None = None
+
+    is_public: bool | None = None
+
+    prep_minutes: int | None = Field(
         default=None,
+        ge=0,
     )
 
-    category_id: int | None = Field(
+    cook_minutes: int | None = Field(
         default=None,
-        gt=0,
+        ge=0,
     )
 
-
-# ============================================================
-# CATEGORY RESPONSE
-# ============================================================
-
-class CategoryResponse(BaseModel):
-    id: int
-    name: str
-
-    model_config = ConfigDict(
-        from_attributes=True
-    )
-
-
-# ============================================================
-# INGREDIENT RESPONSE
-# ============================================================
-
-class IngredientResponse(BaseModel):
-    id: int
-    name: str
-
-    model_config = ConfigDict(
-        from_attributes=True
-    )
-
-
-# ============================================================
-# RECIPE INGREDIENT RESPONSE
-# ============================================================
-
-class RecipeIngredientResponse(BaseModel):
-    id: int
-    recipe_id: int
-    ingredient_id: int
-    amount: float | None
-    unit: str
-    preparation: str | None
-
-    ingredient: IngredientResponse
-
-    model_config = ConfigDict(
-        from_attributes=True
-    )
-
-
-# ============================================================
-# RECIPE STEP RESPONSE
-# ============================================================
-
-class RecipeStepResponse(BaseModel):
-    id: int
-    step_number: int
-    instruction: str
-
-    model_config = ConfigDict(
-        from_attributes=True
-    )
-
-
-# ============================================================
-# RECIPE RESPONSE
-# ============================================================
 
 class RecipeResponse(BaseModel):
+    model_config = ConfigDict(
+        from_attributes=True
+    )
+
     id: int
     name: str
     description: str | None
-    category: CategoryResponse | None
+    category_id: int | None
+    owner_id: int
+    is_public: bool
+    prep_minutes: int
+    cook_minutes: int
     created_at: datetime
-
-    ingredients: list[
-        RecipeIngredientResponse
-    ] = []
-
-    steps: list[
-        RecipeStepResponse
-    ] = []
-
-    model_config = ConfigDict(
-        from_attributes=True
-    )

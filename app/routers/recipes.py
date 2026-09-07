@@ -1,5 +1,3 @@
-from typing import Optional
-
 from fastapi import (
     APIRouter,
     Depends,
@@ -7,29 +5,23 @@ from fastapi import (
     Query,
     status,
 )
-
-from sqlalchemy import asc, desc, func, select
+from sqlalchemy import (
+    func,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.dependencies import get_current_user
 from app.database.connection import get_session
-
 from app.models.recipe import Recipe
-from app.models.category import Category
-from app.models.ingredient import Ingredient
 from app.models.recipe_ingredient import RecipeIngredient
-from app.models.recipe_step import RecipeStep
-
+from app.models.ingredient import Ingredient
+from app.models.user import User
 from app.schemas.recipe import (
     RecipeCreate,
-    RecipeUpdate,
     RecipeResponse,
-)
-
-from app.schemas.recipe_ingredient import (
-    RecipeIngredientCreate,
-    RecipeIngredientUpdate,
-    RecipeIngredientResponse,
+    RecipeUpdate,
 )
 
 
@@ -40,7 +32,6 @@ router = APIRouter(
 
 
 # ============================================================
-# STAGE 1
 # CREATE RECIPE
 # ============================================================
 
@@ -52,9 +43,17 @@ router = APIRouter(
 async def create_recipe(
     recipe_data: RecipeCreate,
     session: AsyncSession = Depends(get_session),
+    current_user: User = Depends(get_current_user),
 ):
+
     recipe = Recipe(
-        **recipe_data.model_dump()
+        name=recipe_data.name,
+        description=recipe_data.description,
+        category_id=recipe_data.category_id,
+        is_public=recipe_data.is_public,
+        prep_minutes=recipe_data.prep_minutes,
+        cook_minutes=recipe_data.cook_minutes,
+        owner_id=current_user.id,
     )
 
     session.add(recipe)
@@ -66,152 +65,105 @@ async def create_recipe(
 
 
 # ============================================================
-# STAGE 3 — LESSON 30–33
-#
-# LIST + SEARCH + FILTER + PAGINATION + SORTING
+# LIST AUTHENTICATED USER'S RECIPES + STAGE 3/5 SEARCH
 # ============================================================
 
 @router.get(
     "",
     response_model=list[RecipeResponse],
-    status_code=status.HTTP_200_OK,
 )
 async def list_recipes(
-    search: Optional[str] = Query(
+    search: str | None = Query(
         default=None,
-        description="Search by recipe name",
+        min_length=1,
     ),
 
-    ingredient: Optional[str] = Query(
+    ingredient: list[str] | None = Query(
         default=None,
-        description="Search by ingredient name",
     ),
 
-    category: Optional[str] = Query(
+    category: str | None = Query(
         default=None,
-        description="Search by category name",
+    ),
+
+    max_time: int | None = Query(
+        default=None,
+        ge=0,
     ),
 
     page: int = Query(
         default=1,
         ge=1,
-        description="Page number",
     ),
 
     limit: int = Query(
         default=10,
         ge=1,
         le=100,
-        description="Number of recipes per page",
-    ),
-
-    sort_by: str = Query(
-        default="created_at",
-        description="Sort field",
-    ),
-
-    sort_order: str = Query(
-        default="desc",
-        description="asc or desc",
     ),
 
     session: AsyncSession = Depends(get_session),
+
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Stage 3 search endpoint.
 
-    Supports:
-
-    GET /recipes
-
-    GET /recipes?search=pasta
-
-    GET /recipes?ingredient=tomato
-
-    GET /recipes?category=dinner
-
-    GET /recipes?search=chicken&category=dinner
-
-    GET /recipes?page=1&limit=10
-
-    GET /recipes?sort_by=name&sort_order=asc
-    """
-
-    # --------------------------------------------------------
-    # Allowed sorting fields
-    # --------------------------------------------------------
-
-    allowed_sort_fields = {
-        "id": Recipe.id,
-        "name": Recipe.name,
-        "created_at": Recipe.created_at,
-    }
-
-    if sort_by not in allowed_sort_fields:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Invalid sort_by. "
-                "Use id, name, or created_at."
-            ),
-        )
-
-    if sort_order not in {"asc", "desc"}:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "sort_order must be either "
-                "'asc' or 'desc'."
-            ),
-        )
-
-    # --------------------------------------------------------
-    # Base query
-    # --------------------------------------------------------
-
-    stmt = (
+    query = (
         select(Recipe)
-        .options(
-            selectinload(Recipe.category),
-            selectinload(Recipe.ingredients)
-            .selectinload(RecipeIngredient.ingredient),
-            selectinload(Recipe.steps),
+        .join(
+            Recipe.category,
+            isouter=True,
+        )
+        .where(
+            Recipe.owner_id == current_user.id
         )
     )
 
     # --------------------------------------------------------
-    # LESSON 30
     # Search by recipe name
-    #
-    # GET /recipes?search=pasta
     # --------------------------------------------------------
 
     if search:
-        search_term = search.strip()
-
-        if search_term:
-            stmt = stmt.where(
-                func.lower(Recipe.name).like(
-                    f"%{search_term.lower()}%"
-                )
-            )
+        query = query.where(
+            Recipe.name.ilike(f"%{search}%")
+        )
 
     # --------------------------------------------------------
-    # LESSON 31
-    # Search by ingredient
+    # Search by category
+    # --------------------------------------------------------
+
+    if category:
+        from app.models.category import Category
+
+        query = query.where(
+            Category.name.ilike(f"%{category}%")
+        )
+
+    # --------------------------------------------------------
+    # STAGE 5
+    # Multiple ingredient filtering
     #
-    # GET /recipes?ingredient=tomato
+    # ?ingredient=chicken&ingredient=rice
+    #
+    # Recipe must contain BOTH ingredients.
     # --------------------------------------------------------
 
     if ingredient:
-        ingredient_term = ingredient.strip()
 
-        if ingredient_term:
-            stmt = (
-                stmt
-                .join(
-                    RecipeIngredient,
-                    RecipeIngredient.recipe_id == Recipe.id,
+        normalized_ingredients = [
+            item.strip().lower()
+            for item in ingredient
+            if item.strip()
+        ]
+
+        normalized_ingredients = list(
+            dict.fromkeys(normalized_ingredients)
+        )
+
+        if normalized_ingredients:
+
+            ingredient_subquery = (
+                select(
+                    RecipeIngredient.recipe_id
                 )
                 .join(
                     Ingredient,
@@ -219,90 +171,106 @@ async def list_recipes(
                     == RecipeIngredient.ingredient_id,
                 )
                 .where(
-                    func.lower(Ingredient.name).like(
-                        f"%{ingredient_term.lower()}%"
+                    func.lower(Ingredient.name).in_(
+                        normalized_ingredients
                     )
+                )
+                .group_by(
+                    RecipeIngredient.recipe_id
+                )
+                .having(
+                    func.count(
+                        func.distinct(
+                            func.lower(Ingredient.name)
+                        )
+                    )
+                    == len(normalized_ingredients)
                 )
             )
 
+            query = query.where(
+                Recipe.id.in_(ingredient_subquery)
+            )
+
     # --------------------------------------------------------
-    # LESSON 32
-    # Search by category
+    # STAGE 5
+    # Maximum total time
     #
-    # GET /recipes?category=dinner
+    # prep_minutes + cook_minutes <= max_time
     # --------------------------------------------------------
 
-    if category:
-        category_term = category.strip()
+    if max_time is not None:
 
-        if category_term:
-            stmt = (
-                stmt
-                .join(
-                    Category,
-                    Category.id == Recipe.category_id,
-                )
-                .where(
-                    func.lower(Category.name).like(
-                        f"%{category_term.lower()}%"
-                    )
-                )
+        total_time = (
+            func.coalesce(
+                Recipe.prep_minutes,
+                0,
             )
+            +
+            func.coalesce(
+                Recipe.cook_minutes,
+                0,
+            )
+        )
+
+        query = query.where(
+            total_time <= max_time
+        )
 
     # --------------------------------------------------------
-    # Remove duplicate recipes caused by joins
-    # --------------------------------------------------------
-
-    stmt = stmt.distinct()
-
-    # --------------------------------------------------------
-    # LESSON 33
     # Sorting
     # --------------------------------------------------------
 
-    sort_column = allowed_sort_fields[sort_by]
-
-    if sort_order == "asc":
-        stmt = stmt.order_by(
-            asc(sort_column)
-        )
-    else:
-        stmt = stmt.order_by(
-            desc(sort_column)
-        )
+    query = query.order_by(
+        Recipe.created_at.desc()
+    )
 
     # --------------------------------------------------------
-    # LESSON 33
     # Pagination
     # --------------------------------------------------------
 
     offset = (page - 1) * limit
 
-    stmt = (
-        stmt
-        .offset(offset)
-        .limit(limit)
+    query = query.offset(
+        offset
+    ).limit(
+        limit
     )
 
-    # --------------------------------------------------------
-    # Execute asynchronously
-    # --------------------------------------------------------
+    result = await session.execute(query)
 
-    result = await session.execute(stmt)
-
-    recipes = (
-        result
-        .scalars()
-        .unique()
-        .all()
-    )
+    recipes = result.scalars().unique().all()
 
     return recipes
 
 
 # ============================================================
-# STAGE 1
-# GET ONE RECIPE
+# PUBLIC RECIPES
+# ============================================================
+
+@router.get(
+    "/public",
+    response_model=list[RecipeResponse],
+)
+async def list_public_recipes(
+    session: AsyncSession = Depends(get_session),
+):
+
+    result = await session.execute(
+        select(Recipe)
+        .where(
+            Recipe.is_public.is_(True)
+        )
+        .order_by(
+            Recipe.created_at.desc()
+        )
+    )
+
+    return result.scalars().all()
+
+
+# ============================================================
+# GET RECIPE BY ID
 # ============================================================
 
 @router.get(
@@ -311,22 +279,20 @@ async def list_recipes(
 )
 async def get_recipe(
     recipe_id: int,
+
     session: AsyncSession = Depends(get_session),
+
+    current_user: User = Depends(get_current_user),
 ):
-    stmt = (
+
+    result = await session.execute(
         select(Recipe)
-        .options(
-            selectinload(Recipe.category),
-            selectinload(Recipe.ingredients)
-            .selectinload(RecipeIngredient.ingredient),
-            selectinload(Recipe.steps),
+        .where(
+            Recipe.id == recipe_id
         )
-        .where(Recipe.id == recipe_id)
     )
 
-    result = await session.execute(stmt)
-
-    recipe = result.scalars().unique().first()
+    recipe = result.scalar_one_or_none()
 
     if recipe is None:
         raise HTTPException(
@@ -334,11 +300,21 @@ async def get_recipe(
             detail="Recipe not found",
         )
 
-    return recipe
+    # Owner can always view the recipe.
+    if recipe.owner_id == current_user.id:
+        return recipe
+
+    # Other authenticated users can only view public recipes.
+    if recipe.is_public:
+        return recipe
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="You are not allowed to view this recipe",
+    )
 
 
 # ============================================================
-# STAGE 1
 # UPDATE RECIPE
 # ============================================================
 
@@ -348,14 +324,20 @@ async def get_recipe(
 )
 async def update_recipe(
     recipe_id: int,
-    recipe_data: RecipeUpdate,
-    session: AsyncSession = Depends(get_session),
-):
-    stmt = select(Recipe).where(
-        Recipe.id == recipe_id
-    )
 
-    result = await session.execute(stmt)
+    recipe_data: RecipeUpdate,
+
+    session: AsyncSession = Depends(get_session),
+
+    current_user: User = Depends(get_current_user),
+):
+
+    result = await session.execute(
+        select(Recipe)
+        .where(
+            Recipe.id == recipe_id
+        )
+    )
 
     recipe = result.scalar_one_or_none()
 
@@ -365,12 +347,22 @@ async def update_recipe(
             detail="Recipe not found",
         )
 
+    if recipe.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only update your own recipes",
+        )
+
     update_data = recipe_data.model_dump(
         exclude_unset=True
     )
 
     for field, value in update_data.items():
-        setattr(recipe, field, value)
+        setattr(
+            recipe,
+            field,
+            value,
+        )
 
     await session.commit()
     await session.refresh(recipe)
@@ -379,7 +371,6 @@ async def update_recipe(
 
 
 # ============================================================
-# STAGE 1
 # DELETE RECIPE
 # ============================================================
 
@@ -389,13 +380,18 @@ async def update_recipe(
 )
 async def delete_recipe(
     recipe_id: int,
-    session: AsyncSession = Depends(get_session),
-):
-    stmt = select(Recipe).where(
-        Recipe.id == recipe_id
-    )
 
-    result = await session.execute(stmt)
+    session: AsyncSession = Depends(get_session),
+
+    current_user: User = Depends(get_current_user),
+):
+
+    result = await session.execute(
+        select(Recipe)
+        .where(
+            Recipe.id == recipe_id
+        )
+    )
 
     recipe = result.scalar_one_or_none()
 
@@ -405,246 +401,13 @@ async def delete_recipe(
             detail="Recipe not found",
         )
 
+    if recipe.owner_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only delete your own recipes",
+        )
+
     await session.delete(recipe)
-
-    await session.commit()
-
-    return None
-
-
-# ============================================================
-# STAGE 2
-# ADD INGREDIENT TO RECIPE
-# ============================================================
-
-@router.post(
-    "/{recipe_id}/ingredients",
-    response_model=RecipeIngredientResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def add_recipe_ingredient(
-    recipe_id: int,
-    ingredient_data,
-    session: AsyncSession = Depends(get_session),
-):
-    recipe_stmt = select(Recipe).where(
-        Recipe.id == recipe_id
-    )
-
-    recipe_result = await session.execute(
-        recipe_stmt
-    )
-
-    recipe = recipe_result.scalar_one_or_none()
-
-    if recipe is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Recipe not found",
-        )
-
-    # --------------------------------------------------------
-    # Find existing ingredient
-    # --------------------------------------------------------
-
-    ingredient_stmt = select(Ingredient).where(
-        func.lower(Ingredient.name)
-        == ingredient_data.name.lower()
-    )
-
-    ingredient_result = await session.execute(
-        ingredient_stmt
-    )
-
-    ingredient = (
-        ingredient_result
-        .scalar_one_or_none()
-    )
-
-    # --------------------------------------------------------
-    # Create ingredient if it doesn't exist
-    # --------------------------------------------------------
-
-    if ingredient is None:
-        ingredient = Ingredient(
-            name=ingredient_data.name
-        )
-
-        session.add(ingredient)
-
-        await session.flush()
-
-    # --------------------------------------------------------
-    # Create relationship
-    # --------------------------------------------------------
-
-    recipe_ingredient = RecipeIngredient(
-        recipe_id=recipe_id,
-        ingredient_id=ingredient.id,
-        amount=ingredient_data.amount,
-        unit=ingredient_data.unit,
-        preparation=ingredient_data.preparation,
-    )
-
-    session.add(recipe_ingredient)
-
-    await session.commit()
-
-    await session.refresh(
-        recipe_ingredient
-    )
-
-    return recipe_ingredient
-
-
-# ============================================================
-# STAGE 2
-# GET RECIPE INGREDIENTS
-# ============================================================
-
-@router.get(
-    "/{recipe_id}/ingredients",
-    response_model=list[RecipeIngredientResponse],
-)
-async def get_recipe_ingredients(
-    recipe_id: int,
-    session: AsyncSession = Depends(get_session),
-):
-    recipe_stmt = select(Recipe.id).where(
-        Recipe.id == recipe_id
-    )
-
-    recipe_result = await session.execute(
-        recipe_stmt
-    )
-
-    recipe_exists = recipe_result.scalar_one_or_none()
-
-    if recipe_exists is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Recipe not found",
-        )
-
-    stmt = (
-        select(RecipeIngredient)
-        .options(
-            selectinload(
-                RecipeIngredient.ingredient
-            )
-        )
-        .where(
-            RecipeIngredient.recipe_id
-            == recipe_id
-        )
-    )
-
-    result = await session.execute(stmt)
-
-    return result.scalars().all()
-
-
-# ============================================================
-# STAGE 2
-# UPDATE RECIPE INGREDIENT
-# ============================================================
-
-@router.put(
-    "/{recipe_id}/ingredients/{recipe_ingredient_id}",
-    response_model=RecipeIngredientResponse,
-)
-async def update_recipe_ingredient(
-    recipe_id: int,
-    recipe_ingredient_id: int,
-    ingredient_data,
-    session: AsyncSession = Depends(get_session),
-):
-    stmt = (
-        select(RecipeIngredient)
-        .options(
-            selectinload(
-                RecipeIngredient.ingredient
-            )
-        )
-        .where(
-            RecipeIngredient.id
-            == recipe_ingredient_id,
-            RecipeIngredient.recipe_id
-            == recipe_id,
-        )
-    )
-
-    result = await session.execute(stmt)
-
-    recipe_ingredient = (
-        result
-        .scalar_one_or_none()
-    )
-
-    if recipe_ingredient is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Recipe ingredient not found",
-        )
-
-    update_data = ingredient_data.model_dump(
-        exclude_unset=True
-    )
-
-    for field, value in update_data.items():
-        if field != "name":
-            setattr(
-                recipe_ingredient,
-                field,
-                value,
-            )
-
-    await session.commit()
-
-    await session.refresh(
-        recipe_ingredient
-    )
-
-    return recipe_ingredient
-
-
-# ============================================================
-# STAGE 2
-# DELETE RECIPE INGREDIENT
-# ============================================================
-
-@router.delete(
-    "/{recipe_id}/ingredients/{recipe_ingredient_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def delete_recipe_ingredient(
-    recipe_id: int,
-    recipe_ingredient_id: int,
-    session: AsyncSession = Depends(get_session),
-):
-    stmt = select(RecipeIngredient).where(
-        RecipeIngredient.id
-        == recipe_ingredient_id,
-        RecipeIngredient.recipe_id
-        == recipe_id,
-    )
-
-    result = await session.execute(stmt)
-
-    recipe_ingredient = (
-        result
-        .scalar_one_or_none()
-    )
-
-    if recipe_ingredient is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Recipe ingredient not found",
-        )
-
-    await session.delete(
-        recipe_ingredient
-    )
 
     await session.commit()
 
