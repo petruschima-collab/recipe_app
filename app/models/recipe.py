@@ -1,14 +1,9 @@
 from datetime import datetime
-from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database.base import Base
-
-
-if TYPE_CHECKING:
-    from app.models.category import Category
 
 
 class Recipe(Base):
@@ -20,7 +15,7 @@ class Recipe(Base):
     )
 
     name: Mapped[str] = mapped_column(
-        String(150),
+        String(255),
         nullable=False,
     )
 
@@ -30,9 +25,8 @@ class Recipe(Base):
     )
 
     category_id: Mapped[int | None] = mapped_column(
-        ForeignKey("categories.id", ondelete="SET NULL"),
+        ForeignKey("categories.id"),
         nullable=True,
-        index=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
@@ -44,4 +38,17 @@ class Recipe(Base):
     category: Mapped["Category | None"] = relationship(
         "Category",
         back_populates="recipes",
+    )
+
+    ingredients: Mapped[list["RecipeIngredient"]] = relationship(
+        "RecipeIngredient",
+        back_populates="recipe",
+        cascade="all, delete-orphan",
+    )
+
+    steps: Mapped[list["RecipeStep"]] = relationship(
+        "RecipeStep",
+        back_populates="recipe",
+        cascade="all, delete-orphan",
+        order_by="RecipeStep.step_number",
     )
